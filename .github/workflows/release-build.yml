@@ -1,0 +1,144 @@
+# WorkDaddy release build pipeline.
+# Builds installers from the source repository and publishes them as releases here.
+name: release-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Source branch / tag / commit"
+        required: false
+        default: "geoly-main"
+      publish:
+        description: "Create a release after building (unchecked = artifacts only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency: release-build
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          repository: geoly-ai/workdaddy-app
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.WORKDADDY_SRC_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Set up pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.4.0 --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --config.confirmModulesPurge=false
+
+      - name: Build
+        run: pnpm --filter "@openwork/desktop" run build:electron
+
+      - name: Package
+        run: pnpm --dir apps/desktop exec electron-builder --config electron-builder.workdaddy.yml --win nsis --x64 --publish never
+
+      - name: Resolve version
+        id: v
+        shell: pwsh
+        run: |
+          $v = (Get-Content apps/desktop/package.json | ConvertFrom-Json).version
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Upload artifacts
+        if: ${{ !inputs.publish }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: workdaddy-win-x64-${{ steps.v.outputs.version }}
+          path: |
+            apps/desktop/dist-electron/workdaddy-win-x64-*.exe
+            apps/desktop/dist-electron/workdaddy-win-x64-*.exe.blockmap
+            apps/desktop/dist-electron/github/workdaddy.yml
+          if-no-files-found: error
+
+      - name: Create release
+        if: ${{ inputs.publish }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = "${{ steps.v.outputs.version }}"
+          gh release create "v$v" --repo "${{ github.repository }}" `
+            --title "WorkDaddy $v" `
+            --notes "WorkDaddy $v" `
+            "apps/desktop/dist-electron/workdaddy-win-x64-$v.exe" `
+            "apps/desktop/dist-electron/workdaddy-win-x64-$v.exe.blockmap" `
+            "apps/desktop/dist-electron/github/workdaddy.yml"
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 90
+    needs: windows
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          repository: geoly-ai/workdaddy-app
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.WORKDADDY_SRC_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Set up pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.4.0 --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --config.confirmModulesPurge=false
+
+      - name: Build
+        run: pnpm --filter "@openwork/desktop" run build:electron
+
+      - name: Package
+        run: pnpm --dir apps/desktop exec electron-builder --config electron-builder.workdaddy.yml --mac dmg zip --arm64 --publish never
+
+      - name: Resolve version
+        id: v
+        run: echo "version=$(node -p "require('./apps/desktop/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifacts
+        if: ${{ !inputs.publish }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: workdaddy-mac-arm64-${{ steps.v.outputs.version }}
+          path: |
+            apps/desktop/dist-electron/workdaddy-mac-arm64-*.dmg
+            apps/desktop/dist-electron/workdaddy-mac-arm64-*.zip
+            apps/desktop/dist-electron/github/workdaddy-mac.yml
+          if-no-files-found: error
+
+      # The macOS update manifest is intentionally not attached to releases yet;
+      # in-app updates on macOS start with the code-signed builds.
+      - name: Attach macOS installer to release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${{ steps.v.outputs.version }}"
+          gh release upload "v$v" --repo "${{ github.repository }}" \
+            "apps/desktop/dist-electron/workdaddy-mac-arm64-$v.dmg"
