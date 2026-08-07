@@ -31,6 +31,31 @@ jobs:
           ref: ${{ inputs.ref }}
           token: ${{ secrets.WORKDADDY_SRC_TOKEN }}
 
+      # 版本号在构建前就解析出来，供下面的 tag 预检使用。
+      - name: Resolve version
+        id: v
+        shell: pwsh
+        run: |
+          $v = (Get-Content apps/desktop/package.json | ConvertFrom-Json).version
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "version=$v"
+
+      # 发布前先确认 tag 未被占用。放在构建之前，避免跑完整轮（约 6 分钟）
+      # 才在最后一步撞上 "a release with the same tag name already exists"。
+      - name: Guard release tag
+        if: ${{ inputs.publish }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = "${{ steps.v.outputs.version }}"
+          gh release view "v$v" --repo "${{ github.repository }}" 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "::error::Release v$v 已存在。请先递增版本号（在 workdaddy-app 执行 pnpm bump:beta）后重试；不要覆盖已交付的二进制。"
+            exit 1
+          }
+          Write-Host "Tag v$v 可用。"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -50,13 +75,6 @@ jobs:
 
       - name: Package
         run: pnpm --dir apps/desktop exec electron-builder --config electron-builder.workdaddy.yml --win nsis --x64 --publish never
-
-      - name: Resolve version
-        id: v
-        shell: pwsh
-        run: |
-          $v = (Get-Content apps/desktop/package.json | ConvertFrom-Json).version
-          "version=$v" >> $env:GITHUB_OUTPUT
 
       - name: Upload artifacts
         if: ${{ !inputs.publish }}
