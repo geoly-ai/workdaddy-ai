@@ -50,11 +50,15 @@ jobs:
         run: |
           $v = "${{ steps.v.outputs.version }}"
           gh release view "v$v" --repo "${{ github.repository }}" 2>$null | Out-Null
-          if ($LASTEXITCODE -eq 0) {
+          $exists = $LASTEXITCODE -eq 0
+          if ($exists) {
             Write-Host "::error::Release v$v 已存在。请先递增版本号（在 workdaddy-app 执行 pnpm bump:beta）后重试；不要覆盖已交付的二进制。"
             exit 1
           }
+          # release 不存在时 gh 返回非 0，而 pwsh 步骤以最后一个原生命令的退出码
+          # 判定成败——不显式 exit 0 的话，"tag 可用"反而会被判为步骤失败。
           Write-Host "Tag v$v 可用。"
+          exit 0
 
       - uses: actions/setup-node@v4
         with:
