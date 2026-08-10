@@ -64,6 +64,12 @@ jobs:
         with:
           node-version: 22
 
+      # Release 正文取自源码仓库的 CHANGELOG.md。同样放在构建之前——小节缺失
+      # 时几秒内就能发现，不必等整轮构建跑完才在最后一步失败。
+      - name: Build release notes
+        if: ${{ inputs.publish }}
+        run: node scripts/release/extract-changelog.mjs --output release-notes.md
+
       - uses: oven-sh/setup-bun@v2
 
       - name: Set up pnpm
@@ -100,7 +106,7 @@ jobs:
           $v = "${{ steps.v.outputs.version }}"
           gh release create "v$v" --repo "${{ github.repository }}" `
             --title "WorkDaddy $v" `
-            --notes "WorkDaddy $v" `
+            --notes-file release-notes.md `
             "apps/desktop/dist-electron/workdaddy-win-x64-$v.exe" `
             "apps/desktop/dist-electron/workdaddy-win-x64-$v.exe.blockmap" `
             "apps/desktop/dist-electron/github/workdaddy.yml"
