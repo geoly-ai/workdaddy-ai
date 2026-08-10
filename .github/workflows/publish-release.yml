@@ -1,0 +1,123 @@
+# 从一次已完成的 release-build 产物创建 Release —— 不重新构建。
+#
+# release-build 的 publish=true 会重新构建一遍，于是发布出去的二进制并不是
+# 此前核对过的那一份（两次构建的产物哈希未必相同），且发布那次会跳过
+# Upload artifacts、事后无从复查。
+#
+# 推荐流程：
+#   1. gh workflow run release-build.yml -f ref=<tag> -f publish=false
+#   2. gh run download <run-id>            核对构件
+#   3. gh workflow run publish-release.yml -f run_id=<run-id>
+#
+# 这样发布的就是核对过的那批字节，全程只构建一次。
+name: publish-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "release-build 的 run id（从该次构建的产物发布）"
+        required: true
+      ref:
+        description: "源码 ref，用于生成 Release 正文；留空则用 v<产物版本号>"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  actions: read # 读取其它 workflow run 的产物
+
+concurrency: release-build # 与构建流程共用，避免与发布中的构建交叉
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          path: dist
+          merge-multiple: true # win/mac 两个产物合并到同一目录，文件名不冲突
+
+      # 版本号取自产物文件名，而不是重新读 package.json——发布的是这批产物，
+      # 版本号就必须由它们自己决定。
+      - name: Resolve version from artifacts
+        id: v
+        run: |
+          set -euo pipefail
+          exe=$(find dist -name 'workdaddy-win-x64-*.exe' | head -1)
+          if [ -z "$exe" ]; then
+            echo "::error::run ${{ inputs.run_id }} 的产物里找不到 workdaddy-win-x64-*.exe"
+            echo "找到的文件："; find dist -type f | head -20
+            exit 1
+          fi
+          v=$(basename "$exe" .exe)
+          v=${v#workdaddy-win-x64-}
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "版本号：$v"
+
+      - name: Guard release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          v="${{ steps.v.outputs.version }}"
+          if gh release view "v$v" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::Release v$v 已存在。同版本号只发一次，不覆盖已交付的二进制。"
+            exit 1
+          fi
+          echo "Tag v$v 可用。"
+
+      - name: Check required assets
+        run: |
+          set -euo pipefail
+          missing=0
+          for pattern in \
+            "workdaddy-win-x64-${{ steps.v.outputs.version }}.exe" \
+            "workdaddy-win-x64-${{ steps.v.outputs.version }}.exe.blockmap" \
+            "workdaddy.yml" \
+            "workdaddy-mac-arm64-${{ steps.v.outputs.version }}.dmg"
+          do
+            if [ -z "$(find dist -name "$pattern" | head -1)" ]; then
+              echo "::error::产物中缺少 $pattern"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || { echo "已有文件："; find dist -type f; exit 1; }
+
+      - name: Checkout source for release notes
+        uses: actions/checkout@v4
+        with:
+          repository: geoly-ai/workdaddy-app
+          ref: ${{ inputs.ref != '' && inputs.ref || format('v{0}', steps.v.outputs.version) }}
+          token: ${{ secrets.WORKDADDY_SRC_TOKEN }}
+          path: src
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build release notes
+        working-directory: src
+        run: node scripts/release/extract-changelog.mjs --version "${{ steps.v.outputs.version }}" --output ../release-notes.md
+
+      # 资产口径与 release-build 保持一致：exe + blockmap + workdaddy.yml + mac dmg。
+      # mac 的 zip 与 workdaddy-mac.yml 刻意不发布——未签名的 mac 自动更新必然
+      # 安装失败，挂出清单比检查不到更糟。
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          v="${{ steps.v.outputs.version }}"
+          gh release create "v$v" --repo "${{ github.repository }}" \
+            --title "WorkDaddy $v" \
+            --notes-file release-notes.md \
+            "$(find dist -name "workdaddy-win-x64-$v.exe" | head -1)" \
+            "$(find dist -name "workdaddy-win-x64-$v.exe.blockmap" | head -1)" \
+            "$(find dist -name 'workdaddy.yml' | head -1)" \
+            "$(find dist -name "workdaddy-mac-arm64-$v.dmg" | head -1)"
+          echo "已发布 v$v，产物来自 run ${{ inputs.run_id }}"

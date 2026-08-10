@@ -10,7 +10,7 @@ on:
         required: false
         default: "geoly-main"
       publish:
-        description: "Create a release after building (unchecked = artifacts only)"
+        description: "构建后直接建 Release（会重新构建一遍；常规发布请用 publish-release）"
         type: boolean
         default: false
 
