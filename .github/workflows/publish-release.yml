@@ -22,6 +22,10 @@ on:
         description: "源码 ref，用于生成 Release 正文；留空则用 v<产物版本号>"
         required: false
         default: ""
+      prerelease:
+        description: "先发为 pre-release 供验收（取消勾选则直接对外发布）"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -65,11 +69,27 @@ jobs:
         run: |
           set -euo pipefail
           v="${{ steps.v.outputs.version }}"
-          if gh release view "v$v" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "::error::Release v$v 已存在。同版本号只发一次，不覆盖已交付的二进制。"
+
+          existing=$(gh release view "v$v" --repo "${{ github.repository }}" --json isPrerelease --jq .isPrerelease 2>/dev/null || echo "")
+
+          if [ -z "$existing" ]; then
+            echo "Tag v$v 可用。"
+            exit 0
+          fi
+
+          # 已正式发布的版本号绝不重发：那批二进制已经交付给用户，
+          # 同版本号存在两份内容会让人无法确定手里的是哪一个。
+          if [ "$existing" = "false" ]; then
+            echo "::error::Release v$v 已正式发布。同版本号只发一次，不覆盖已交付的二进制——请先递增版本号（pnpm bump:beta）。"
             exit 1
           fi
-          echo "Tag v$v 可用。"
+
+          # 仍是 pre-release 的版本号允许重发：它从未进入 releases/latest，
+          # 没有任何用户拿到过，删掉重发不违反上面那条纪律，也省得为一次
+          # 验收未通过就废掉一个版本号。
+          echo "::warning::v$v 当前是未验收的 pre-release，将删除后用本次产物重发。"
+          gh release delete "v$v" --repo "${{ github.repository }}" --yes --cleanup-tag=false
+          echo "旧的 pre-release 已删除，继续发布。"
 
       - name: Check required assets
         run: |
@@ -113,11 +133,28 @@ jobs:
         run: |
           set -euo pipefail
           v="${{ steps.v.outputs.version }}"
+
+          # 默认发为 pre-release：桌面端的更新源是 releases/latest/download/workdaddy.yml，
+          # 而 releases/latest 只解析最新的「非 pre-release」，因此这一步发出去的包
+          # 不会进入任何用户的自动更新，团队仍可从 Releases 页面下载验收。
+          # 验收通过后执行转正（见下方输出的命令），用户才开始收到更新。
+          PRERELEASE_FLAG=""
+          if [ "${{ inputs.prerelease }}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
           gh release create "v$v" --repo "${{ github.repository }}" \
             --title "WorkDaddy $v" \
             --notes-file release-notes.md \
+            $PRERELEASE_FLAG \
             "$(find dist -name "workdaddy-win-x64-$v.exe" | head -1)" \
             "$(find dist -name "workdaddy-win-x64-$v.exe.blockmap" | head -1)" \
             "$(find dist -name 'workdaddy.yml' | head -1)" \
             "$(find dist -name "workdaddy-mac-arm64-$v.dmg" | head -1)"
+
+          if [ "${{ inputs.prerelease }}" = "true" ]; then
+            echo "::notice::v$v 已发为 pre-release，用户不会收到自动更新。验收通过后执行：gh release edit v$v --repo ${{ github.repository }} --prerelease=false --latest"
+          else
+            echo "::notice::v$v 已直接对外发布，用户将开始收到自动更新。"
+          fi
           echo "已发布 v$v，产物来自 run ${{ inputs.run_id }}"
