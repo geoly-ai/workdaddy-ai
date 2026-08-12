@@ -83,7 +83,12 @@ jobs:
       - name: Build
         run: pnpm --filter "@openwork/desktop" run build:electron
 
+      # electron-builder.workdaddy.yml 的 beforePack 钩子会把 Google Analytics 的
+      # OAuth 客户端凭据写进包里（GA4 插件用），缺任一变量即终止打包。
       - name: Package
+        env:
+          WORKDADDY_GOOGLE_ANALYTICS_OAUTH_CLIENT_ID: ${{ secrets.WORKDADDY_GOOGLE_ANALYTICS_OAUTH_CLIENT_ID }}
+          WORKDADDY_GOOGLE_ANALYTICS_OAUTH_CLIENT_SECRET: ${{ secrets.WORKDADDY_GOOGLE_ANALYTICS_OAUTH_CLIENT_SECRET }}
         run: pnpm --dir apps/desktop exec electron-builder --config electron-builder.workdaddy.yml --win nsis --x64 --publish never
 
       - name: Upload artifacts
@@ -142,7 +147,11 @@ jobs:
       - name: Build
         run: pnpm --filter "@openwork/desktop" run build:electron
 
+      # 同 Windows job：beforePack 钩子需要 GA OAuth 凭据，缺了会终止打包。
       - name: Package
+        env:
+          WORKDADDY_GOOGLE_ANALYTICS_OAUTH_CLIENT_ID: ${{ secrets.WORKDADDY_GOOGLE_ANALYTICS_OAUTH_CLIENT_ID }}
+          WORKDADDY_GOOGLE_ANALYTICS_OAUTH_CLIENT_SECRET: ${{ secrets.WORKDADDY_GOOGLE_ANALYTICS_OAUTH_CLIENT_SECRET }}
         run: pnpm --dir apps/desktop exec electron-builder --config electron-builder.workdaddy.yml --mac dmg zip --arm64 --publish never
 
       - name: Resolve version
